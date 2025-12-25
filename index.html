@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>口语评测</title>
+    <!-- 引入 Azure Speech SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/microsoft-cognitiveservices-speech-sdk@latest/distrib/browser/microsoft.cognitiveservices.speech.sdk.bundle-min.js"></script>
+    <style>
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            overflow: hidden; /* 防止下拉刷新干扰长按 */
+        }
+        .card {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            padding: 30px 20px;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+        h1 { margin: 0; color: #34495e; font-size: 32px; word-break: break-word; }
+        .phonetic { color: #7f8c8d; font-family: "Charis SIL", serif; margin: 10px 0 20px; font-size: 18px; }
+        
+        /* 结果区域 */
+        #result-area { display: none; margin-top: 20px; animation: fadeIn 0.5s; }
+        .score-circle {
+            width: 100px; height: 100px; border-radius: 50%;
+            background: #ecf0f1; border: 5px solid #3498db;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            margin: 0 auto 15px; color: #2c3e50;
+        }
+        .score-val { font-size: 36px; font-weight: bold; line-height: 1; }
+        .score-label { font-size: 12px; color: #7f8c8d; }
+        
+        .metrics { display: flex; justify-content: space-around; font-size: 14px; color: #555; margin-bottom: 15px; }
+        .metric-item strong { display: block; font-size: 16px; color: #333; }
+
+        /* 底部固定录音按钮 */
+        .record-container {
+            position: fixed; bottom: 40px; left: 0; right: 0;
+            display: flex; justify-content: center; align-items: center;
+            flex-direction: column;
+        }
+        .record-btn {
+            width: 80px; height: 80px; border-radius: 50%;
+            background: #3498db; border: none;
+            box-shadow: 0 4px 15px rgba(52, 152, 219, 0.4);
+            color: white; font-size: 32px;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; user-select: none; transition: transform 0.1s;
+            touch-action: none; /* 关键：防止长按触发系统菜单 */
+        }
+        .record-btn.recording {
+            background: #e74c3c; transform: scale(1.1);
+            box-shadow: 0 0 20px rgba(231, 76, 60, 0.6);
+        }
+        .hint { margin-top: 15px; color: #95a5a6; font-size: 14px; text-shadow: 0 1px 1px white; }
+        
+        .btn-playback {
+            background: #2ecc71; color: white; border: none; padding: 8px 20px;
+            border-radius: 20px; font-size: 14px; cursor: pointer; margin-top: 10px;
+        }
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+    <div class="card" id="main-card">
+        <h1 id="word-display">Loading...</h1>
+        <div class="phonetic" id="phonetic-display"></div>
+        <div id="status" style="height:20px; color:#e67e22; font-size:14px;">准备就绪</div>
+
+        <div id="result-area">
+            <div class="score-circle">
+                <div class="score-val" id="score-total">0</div>
+                <div class="score-label">总分</div>
+            </div>
+            <div class="metrics">
+                <div class="metric-item">准确度<br><strong id="score-acc">0</strong></div>
+                <div class="metric-item">流利度<br><strong id="score-flu">0</strong></div>
+                <div class="metric-item">完整度<br><strong id="score-comp">0</strong></div>
+            </div>
+            <button class="btn-playback" id="playback-btn" style="display:none;">▶ 播放我的录音</button>
+        </div>
+    </div>
+
+    <div class="record-container">
+        <button class="record-btn" id="record-btn">🎤</button>
+        <div class="hint" id="hint-text">长按按钮 说话</div>
+    </div>
+
+    <script>
+        // --- 默认配置 (填入您的 Key 以便直接打开测试) ---
+        const DEFAULT_KEY = "4caI4L1m6NJW3szOX0d2EDkCT9OqMRw2E1tFwzQVSDWNHMwNjWeRJQQJ99BLACqBBLyXJ3w3AAAYACOG87ve";
+        const DEFAULT_REGION = "southeastasia";
+
+        // 1. 获取 URL 参数 (URL参数优先，如果没有则使用上面的默认值)
+        const params = new URLSearchParams(window.location.search);
+        const word = params.get('word') || 'Hello'; // 默认单词，方便直接打开测试
+        const phonetic = params.get('phonetic') || '';
+        
+        const region = params.get('region') || DEFAULT_REGION;
+        const key = params.get('key') || DEFAULT_KEY; 
+
+        // 2. 初始化 UI
+        document.getElementById('word-display').innerText = word;
+        document.getElementById('phonetic-display').innerText = phonetic;
+        const statusDiv = document.getElementById('status');
+        const recordBtn = document.getElementById('record-btn');
+        const resultArea = document.getElementById('result-area');
+        const hintText = document.getElementById('hint-text');
+
+        // 3. 语音相关变量
+        let SpeechSDK;
+        let recognizer;
+        let mediaRecorder;
+        let audioChunks = [];
+        let recordedAudioUrl;
+        let isRecording = false;
+
+        // 4. 初始化 Azure SDK
+        if (window.SpeechSDK) {
+            SpeechSDK = window.SpeechSDK;
+        } else {
+            statusDiv.innerText = "正在加载 SDK...";
+            // 等待 CDN 加载
+            window.onload = function() { SpeechSDK = window.SpeechSDK; statusDiv.innerText = "准备就绪"; }
+        }
+
+        function startRecording(e) {
+            if(e) e.preventDefault();
+            if(isRecording) return;
+            if(!key) { alert("未配置 Azure Key。请在 URL 中添加 ?key=... 或在代码中修改 DEFAULT_KEY"); return; }
+            
+            isRecording = true;
+            recordBtn.classList.add('recording');
+            hintText.innerText = "正在录音...松开结束";
+            statusDiv.innerText = "听音中...";
+            resultArea.style.display = 'none';
+
+            // A. 启动浏览器录音 (用于回放)
+            navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+                audioChunks = [];
+                // iOS 兼容性处理
+                let options = {};
+                if (MediaRecorder.isTypeSupported("audio/mp4")) options.mimeType = "audio/mp4";
+                else if (MediaRecorder.isTypeSupported("audio/webm")) options.mimeType = "audio/webm";
+                
+                try { mediaRecorder = new MediaRecorder(stream, options); } 
+                catch(e) { mediaRecorder = new MediaRecorder(stream); }
+
+                mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                    if(recordedAudioUrl) URL.revokeObjectURL(recordedAudioUrl);
+                    recordedAudioUrl = URL.createObjectURL(blob);
+                    const pb = document.getElementById('playback-btn');
+                    pb.style.display = 'inline-block';
+                    pb.onclick = () => new Audio(recordedAudioUrl).play();
+                };
+                mediaRecorder.start();
+                
+                // B. 启动 Azure 评测
+                startAzureAssessment();
+                
+            }).catch(err => {
+                statusDiv.innerText = "无法访问麦克风: " + err.message;
+                isRecording = false;
+                recordBtn.classList.remove('recording');
+            });
+        }
+
+        function startAzureAssessment() {
+            const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(key, region);
+            speechConfig.speechRecognitionLanguage = "en-US";
+            const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+            
+            // 使用更详细的评测配置
+            const pronConfig = new SpeechSDK.PronunciationAssessmentConfig(
+                word,
+                SpeechSDK.PronunciationAssessmentGradingSystem.HundredMark,
+                SpeechSDK.PronunciationAssessmentGranularity.Phoneme,
+                true
+            );
+
+            recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+            pronConfig.applyTo(recognizer);
+
+            recognizer.recognized = function (s, e) {
+                if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+                    const res = SpeechSDK.PronunciationAssessmentResult.fromResult(e.result);
+                    showResult(res);
+                    statusDiv.innerText = "评测完成";
+                } else if (e.result.reason === SpeechSDK.ResultReason.NoMatch) {
+                    statusDiv.innerText = "未能识别语音";
+                }
+            };
+            
+            recognizer.canceled = (s, e) => {
+                console.log("Canceled: " + e.errorDetails);
+                if(isRecording) {
+                    statusDiv.innerText = "连接中断: " + (e.errorDetails || "请检查 Key/Region"); 
+                }
+            };
+
+            recognizer.startContinuousRecognitionAsync();
+        }
+
+        function stopRecording(e) {
+            if(e) e.preventDefault();
+            if(!isRecording) return;
+            isRecording = false;
+
+            recordBtn.classList.remove('recording');
+            hintText.innerText = "长按按钮 说话";
+            statusDiv.innerText = "正在分析...";
+
+            if(mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+            if(recognizer) {
+                recognizer.stopContinuousRecognitionAsync(() => {
+                    recognizer.close();
+                    recognizer = undefined;
+                });
+            }
+        }
+
+        function showResult(res) {
+            resultArea.style.display = 'block';
+            
+            // 动画效果
+            animateValue("score-total", 0, res.pronunciationScore, 1000);
+            document.getElementById('score-acc').innerText = res.accuracyScore.toFixed(0);
+            document.getElementById('score-flu').innerText = res.fluencyScore.toFixed(0);
+            document.getElementById('score-comp').innerText = res.completenessScore.toFixed(0);
+
+            const score = res.pronunciationScore;
+            const circle = document.querySelector('.score-circle');
+            if(score >= 80) circle.style.borderColor = '#2ecc71';
+            else if(score >= 60) circle.style.borderColor = '#f1c40f';
+            else circle.style.borderColor = '#e74c3c';
+        }
+
+        function animateValue(id, start, end, duration) {
+            const obj = document.getElementById(id);
+            let startTimestamp = null;
+            const step = (timestamp) => {
+                if (!startTimestamp) startTimestamp = timestamp;
+                const progress = Math.min((timestamp - startTimestamp) / duration, 1);
+                obj.innerHTML = Math.floor(progress * (end - start) + start);
+                if (progress < 1) window.requestAnimationFrame(step);
+            };
+            window.requestAnimationFrame(step);
+        }
+
+        // 绑定事件
+        recordBtn.addEventListener('mousedown', startRecording);
+        recordBtn.addEventListener('touchstart', startRecording);
+        
+        window.addEventListener('mouseup', stopRecording);
+        window.addEventListener('touchend', stopRecording);
+        
+        // 禁用右键
+        window.oncontextmenu = (e) => { e.preventDefault(); return false; }
+    </script>
+</body>
+</html>
